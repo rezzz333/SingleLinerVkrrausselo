@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Générateur de Stippling</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f0f0f0;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 20px;
+        }
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .control-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        input[type="range"] {
+            width: 100%;
+        }
+        .canvas-container {
+            background: #BF0A2B;
+            padding: 20px;
+            border-radius: 8px;
+            position: relative;
+        }
+        canvas {
+            background: transparent;
+            max-width: 100%;
+            height: auto;
+        }
+        .status {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <div class="control-group">
+                <input type="file" id="imageInput" accept="image/*">
+            </div>
+            
+            <div class="control-group">
+                <label>Luminosité: <span id="brightnessValue">0</span></label>
+                <input type="range" id="brightness" min="-128" max="128" value="0">
+            </div>
+            
+            <div class="control-group">
+                <label>Densité des points: <span id="densityValue">4</span></label>
+                <input type="range" id="density" min="2" max="6" value="4">
+            </div>
+            
+            <div class="control-group">
+                <label>Longueur max des traits: <span id="lengthValue">100</span></label>
+                <input type="range" id="maxLength" min="50" max="200" value="100">
+            </div>
+            
+            <div class="control-group">
+                <label>Seuil Otsu: <span id="otsuValue">128</span></label>
+                <input type="range" id="otsuThreshold" min="0" max="255" value="128">
+            </div>
+            
+            <div class="control-group">
+                <label>Diffusion Floyd-Steinberg: <span id="ditherValue">0.5</span></label>
+                <input type="range" id="dithering" min="0" max="100" value="50">
+            </div>
+            
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="useCurves"> Utiliser des courbes
+                </label>
+            </div>
+            
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="showPaths" checked> Afficher les tracés
+                </label>
+            </div>
+            
+            <div class="control-group">
+                <label>Seuil N&B: <span id="thresholdValue">128</span></label>
+                <input type="range" id="threshold" min="0" max="255" value="128">
+            </div>
+            
+            <button id="exportBlackSvg" disabled>Exporter dark SVG</button>
+            <button id="exportWhiteSvg" disabled>Exporter light SVG</button>
+
+        </div>
+        
+        <div class="canvas-container">
+            <canvas id="canvas"></canvas>
+            <div class="status" id="status"></div>
+        </div>
+    </div>
+
+    <script>
+        class StipplingGenerator {
+            constructor() {
+                this.canvas = document.getElementById('canvas');
+                this.ctx = this.canvas.getContext('2d');
+                this.imageData = null;
+                this.paths = [];
+                this.darkPaths = [];  // Pour les zones sombres
+                this.lightPaths = []; // Pour les zones claires
+                this.setupEventListeners();
+            }
+
+            setupEventListeners() {
+                document.getElementById('imageInput').addEventListener('change', this.handleImageUpload.bind(this));
+                document.getElementById('brightness').addEventListener('input', this.updateValue.bind(this, 'brightnessValue'));
+                document.getElementById('density').addEventListener('input', this.updateValue.bind(this, 'densityValue'));
+                document.getElementById('maxLength').addEventListener('input', this.updateValue.bind(this, 'lengthValue'));
+                document.getElementById('otsuThreshold').addEventListener('input', this.updateValue.bind(this, 'otsuValue'));
+                document.getElementById('dithering').addEventListener('input', this.updateValue.bind(this, 'ditherValue'));
+                document.getElementById('threshold').addEventListener('input', this.updateValue.bind(this, 'thresholdValue'));
+                
+                const controls = ['useCurves', 'showPaths', 'brightness', 'density', 'maxLength', 
+                                'otsuThreshold', 'dithering', 'threshold'];
+                controls.forEach(id => {
+                    document.getElementById(id).addEventListener('change', this.processImage.bind(this));
+                });
+                
+                document.getElementById('exportBlackSvg').addEventListener('click', this.exportBlackSvg.bind(this));
+                document.getElementById('exportWhiteSvg').addEventListener('click', this.exportWhiteSvg.bind(this));
+
+            }
+
+            updateValue(elementId, event) {
+                document.getElementById(elementId).textContent = event.target.value;
+                this.processImage();
+            }
+
+            async handleImageUpload(event) {
+                const file = event.target.files[0];
+                if (!file) return;
+                
+                this.showStatus("Chargement de l'image...");
+                
+                try {
+                    const image = await this.loadImage(file);
+                    this.resizeImage(image);
+                    await this.processImage();
+                    document.getElementById('exportBlackSvg').disabled = false;
+                    document.getElementById('exportWhiteSvg').disabled = false;
+                } catch (error) {
+                    this.showStatus('Erreur: ' + error.message, true);
+                }
+            }
+
+            loadImage(file) {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = e => {
+                        const image = new Image();
+                        image.onload = () => resolve(image);
+                        image.onerror = reject;
+                        image.src = e.target.result;
+                    };
+                    reader.onerror = reject;
+                    reader.readAsDataURL(file);
+                });
+            }
+
+            resizeImage(image) {
+                const maxSize = 1000;
+                let width = image.width;
+                let height = image.height;
+                
+                if (width > maxSize || height > maxSize) {
+                    if (width > height) {
+                        height = (height / width) * maxSize;
+                        width = maxSize;
+                    } else {
+                        width = (width / height) * maxSize;
+                        height = maxSize;
+                    }
+                }
+                
+                this.canvas.width = width;
+                this.canvas.height = height;
+                this.ctx.drawImage(image, 0, 0, width, height);
+            }
+
+            async processImage() {
+                if (!this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height).data.some(x => x !== 0)) {
+                    return;
+                }
+                
+                this.showStatus('Traitement en cours...');
+                
+                await new Promise(resolve => setTimeout(resolve, 0)); // Allow UI to update
+                
+                try {
+                    const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+                    this.applyBrightnessContrast(imageData);
+                    this.applyOtsuThreshold(imageData);
+                    this.applyFloydSteinberg(imageData);
+                    this.generatePaths(imageData);
+                    this.render();
+                    
+                    this.showStatus(`Générés: ${this.paths.length} chemins`);
+                } catch (error) {
+                    this.showStatus('Erreur: ' + error.message, true);
+                }
+            }
+
+            applyBrightnessContrast(imageData) {
+                const brightness = parseInt(document.getElementById('brightness').value);
+                const data = imageData.data;
+                
+                for (let i = 0; i < data.length; i += 4) {
+                    if (data[i + 3] < 128) continue; // Skip transparent pixels
+                    
+                    const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
+                    const adjusted = Math.max(0, Math.min(255, gray + brightness));
+                    
+                    data[i] = data[i + 1] = data[i + 2] = adjusted;
+                }
+            }
+
+            applyOtsuThreshold(imageData) {
+                const threshold = parseInt(document.getElementById('otsuThreshold').value);
+                const data = imageData.data;
+                
+                for (let i = 0; i < data.length; i += 4) {
+                    if (data[i + 3] < 128) continue;
+                    
+                    const gray = data[i];
+                    data[i] = data[i + 1] = data[i + 2] = gray < threshold ? 0 : 255;
+                }
+            }
+
+            applyFloydSteinberg(imageData) {
+                const strength = parseFloat(document.getElementById('dithering').value) / 100;
+                const width = imageData.width;
+                const data = imageData.data;
+                
+                for (let y = 0; y < imageData.height - 1; y++) {
+                    for (let x = 1; x < width - 1; x++) {
+                        const idx = (y * width + x) * 4;
+                        if (data[idx + 3] < 128) continue;
+                        
+                        const oldPixel = data[idx];
+                        const newPixel = oldPixel < 128 ? 0 : 255;
+                        data[idx] = data[idx + 1] = data[idx + 2] = newPixel;
+                        
+                        const error = (oldPixel - newPixel) * strength;
+                        
+                        // Distribute error
+                        this.distributeError(data, width, x, y, idx + 4, error * 7/16);
+                        this.distributeError(data, width, x - 1, y + 1, idx + width * 4 - 4, error * 3/16);
+                        this.distributeError(data, width, x, y + 1, idx + width * 4, error * 5/16);
+                        this.distributeError(data, width, x + 1, y + 1, idx + width * 4 + 4, error * 1/16);
+                    }
+                }
+            }
+
+            distributeError(data, width, x, y, idx, error) {
+                if (x < 0 || x >= width || idx < 0 || idx >= data.length || data[idx + 3] < 128) return;
+                
+                data[idx] = Math.max(0, Math.min(255, data[idx] + error));
+                data[idx + 1] = data[idx];
+                data[idx + 2] = data[idx];
+            }
+
+            generatePaths(imageData) {
+                const density = parseInt(document.getElementById('density').value);
+                const maxLength = parseInt(document.getElementById('maxLength').value);
+                const threshold = parseInt(document.getElementById('threshold').value);
+                
+                this.darkPaths = [];
+                this.lightPaths = [];
+                const { darkPoints, lightPoints } = this.generatePoints(imageData, density);
+                const visited = new Set();
+                
+                // Générer les chemins sombres
+                for (const point of darkPoints) {
+                    if (visited.has(`${point.x},${point.y}`)) continue;
+                    const path = this.tracePath(point, darkPoints, maxLength, visited);
+                    if (path.length > 1) {
+                        this.darkPaths.push(path);
+                    }
+                }
+
+                // Réinitialiser visited pour les chemins clairs
+                visited.clear();
+                
+                // Générer les chemins clairs
+                for (const point of lightPoints) {
+                    if (visited.has(`${point.x},${point.y}`)) continue;
+                    const path = this.tracePath(point, lightPoints, maxLength, visited);
+                    if (path.length > 1) {
+                        this.lightPaths.push(path);
+                    }
+                }
+            }
+            
+            generatePoints(imageData, density) {
+                const darkPoints = [];
+                const lightPoints = [];
+                const data = imageData.data;
+                const step = Math.max(1, Math.floor(16 / density));
+                
+                for (let y = 0; y < imageData.height; y += step) {
+                    for (let x = 0; x < imageData.width; x += step) {
+                        const idx = (y * imageData.width + x) * 4;
+                        if (data[idx + 3] < 128) continue;
+                        
+                        const brightness = data[idx];
+                        // Points sombres (zones sombres)
+                        if (brightness < 128 && Math.random() * 255 > brightness) {
+                            darkPoints.push({x, y});
+                        }
+                        // Points clairs (zones claires)
+                        else if (brightness >= 128 && Math.random() * 255 < brightness) {
+                            lightPoints.push({x, y});
+                        }
+                    }
+                }
+                
+                return { darkPoints, lightPoints };
+            }
+
+            tracePath(start, points, maxLength, visited) {
+                const path = [start];
+                let current = start;
+                visited.add(`${start.x},${start.y}`);
+                
+                while (path.length < maxLength) {
+                    const nearest = this.findNearestUnvisited(current, points, visited);
+                    if (!nearest) break;
+                    
+                    path.push(nearest);
+                    visited.add(`${nearest.x},${nearest.y}`);
+                    current = nearest;
+                }
+                
+                return path;
+            }
+
+            findNearestUnvisited(point, points, visited) {
+                let nearest = null;
+                let minDist = Infinity;
+                
+                for (const p of points) {
+                    if (visited.has(`${p.x},${p.y}`)) continue;
+                    
+                    const dist = Math.hypot(p.x - point.x, p.y - point.y);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearest = p;
+                    }
+                }
+                
+                return nearest;
+            }
+
+            render() {
+                this.ctx.fillStyle = '#BF0A2B';
+                this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+                
+                if (!document.getElementById('showPaths').checked) return;
+                
+                const useCurves = document.getElementById('useCurves').checked;
+                
+                this.ctx.lineCap = 'round';
+                this.ctx.lineJoin = 'round';
+                
+                // Dessiner les chemins sombres
+                this.ctx.strokeStyle = 'black';
+                this.ctx.lineWidth = 2;
+                this.renderPaths(this.darkPaths, useCurves);
+                
+                // Dessiner les chemins clairs
+                this.ctx.strokeStyle = 'white';
+                this.ctx.lineWidth = 2;
+                this.renderPaths(this.lightPaths, useCurves);
+            }
+            
+            renderPaths(paths, useCurves) {
+                for (const path of paths) {
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(path[0].x, path[0].y);
+                    
+                    if (useCurves && path.length > 2) {
+                        for (let i = 1; i < path.length - 1; i++) {
+                            const xc = (path[i].x + path[i + 1].x) / 2;
+                            const yc = (path[i].y + path[i + 1].y) / 2;
+                            this.ctx.quadraticCurveTo(path[i].x, path[i].y, xc, yc);
+                        }
+                        const last = path[path.length - 1];
+                        this.ctx.lineTo(last.x, last.y);
+                    } else {
+                        for (let i = 1; i < path.length; i++) {
+                            this.ctx.lineTo(path[i].x, path[i].y);
+                        }
+                    }
+                    
+                    this.ctx.stroke();
+                }
+            }
+
+            exportBlackSvg() {
+                if (this.darkPaths.length === 0) {
+                    this.showStatus('Aucun chemin à exporter', true);
+                    return;
+                }
+                
+                this.showStatus('Génération du SVG...');
+                
+                const useCurves = document.getElementById('useCurves').checked;
+                const fileName = document.getElementById('imageInput').files[0].name;
+                const baseName = fileName.split('.')[0];
+                
+                // Créer le contenu SVG
+                let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${this.canvas.width} ${this.canvas.height}">`;
+                
+                // Ajouter les chemins
+                for (const path of this.darkPaths) {
+                    let d = `M ${path[0].x} ${path[0].y}`;
+                    
+                    if (useCurves && path.length > 2) {
+                        for (let i = 1; i < path.length - 1; i++) {
+                            const xc = (path[i].x + path[i + 1].x) / 2;
+                            const yc = (path[i].y + path[i + 1].y) / 2;
+                            d += ` Q ${path[i].x} ${path[i].y} ${xc} ${yc}`;
+                        }
+                        const last = path[path.length - 1];
+                        d += ` L ${last.x} ${last.y}`;
+                    } else {
+                        for (let i = 1; i < path.length; i++) {
+                            d += ` L ${path[i].x} ${path[i].y}`;
+                        }
+                    }
+                    
+                    svg += `<path d="${d}" stroke="black" stroke-width="1" fill="none"/>`;
+                }
+                
+                svg += '</svg>';
+                
+                // Créer le fichier et le télécharger
+                const blob = new Blob([svg], { type: 'image/svg+xml' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${baseName}-darkPaths.svg`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+                this.showStatus(`SVG exporté : ${this.darkPaths.length} chemins`);
+            }
+
+
+            exportWhiteSvg() {
+                if (this.lightPaths.length === 0) {
+                    this.showStatus('Aucun chemin à exporter', true);
+                    return;
+                }
+                
+                this.showStatus('Génération du SVG...');
+                
+                const useCurves = document.getElementById('useCurves').checked;
+                const fileName = document.getElementById('imageInput').files[0].name;
+                const baseName = fileName.split('.')[0];
+                
+                // Créer le contenu SVG
+                let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${this.canvas.width} ${this.canvas.height}">`;
+                
+                // Ajouter les chemins
+                for (const path of this.lightPaths) {
+                    let d = `M ${path[0].x} ${path[0].y}`;
+                    
+                    if (useCurves && path.length > 2) {
+                        for (let i = 1; i < path.length - 1; i++) {
+                            const xc = (path[i].x + path[i + 1].x) / 2;
+                            const yc = (path[i].y + path[i + 1].y) / 2;
+                            d += ` Q ${path[i].x} ${path[i].y} ${xc} ${yc}`;
+                        }
+                        const last = path[path.length - 1];
+                        d += ` L ${last.x} ${last.y}`;
+                    } else {
+                        for (let i = 1; i < path.length; i++) {
+                            d += ` L ${path[i].x} ${path[i].y}`;
+                        }
+                    }
+                    
+                    svg += `<path d="${d}" stroke="black" stroke-width="1" fill="none"/>`;
+                }
+                
+                svg += '</svg>';
+                
+                // Créer le fichier et le télécharger
+                const blob = new Blob([svg], { type: 'image/svg+xml' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${baseName}-lightPaths.svg`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+                this.showStatus(`SVG exporté : ${this.lightPaths.length} chemins`);
+            }
+
+            showStatus(message, isError = false) {
+                const status = document.getElementById('status');
+                status.textContent = message;
+                status.style.display = 'block';
+                status.style.backgroundColor = isError ? 'rgba(255,0,0,0.8)' : 'rgba(0,0,0,0.8)';
+                
+                if (!isError) {
+                    setTimeout(() => {
+                        status.style.display = 'none';
+                    }, 3000);
+                }
+            }
+        }
+
+        // Initialiser l'application
+        new StipplingGenerator();
+    </script>
+</body>
+</html>
